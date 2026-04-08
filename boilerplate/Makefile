@@ -2,6 +2,7 @@ obj-m += monitor.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
+
 # If you want host-built workload binaries to run directly inside an Alpine
 # rootfs, you can override this with WORKLOAD_LDFLAGS=-static when your
 # toolchain supports it.
@@ -14,7 +15,7 @@ all: $(USER_TARGETS) module
 module: monitor.ko
 
 engine: engine.c monitor_ioctl.h
-	gcc -O2 -Wall -Wextra -o engine engine.c -lpthread
+	gcc -O2 -Wall -Wextra -pthread -g -o engine engine.c
 
 memory_hog: memory_hog.c
 	gcc -O2 -Wall $(WORKLOAD_LDFLAGS) -o memory_hog memory_hog.c
@@ -30,9 +31,16 @@ monitor.ko: monitor.c monitor_ioctl.h
 
 clean:
 	if [ -d "$(KDIR)" ]; then $(MAKE) -C $(KDIR) M=$(PWD) clean; fi
-	rm -f $(USER_TARGETS) *.o *.mod *.mod.c *.symvers *.order
+	rm -f $(USER_TARGETS) *.o *.mod *.mod.c *.symvers *.order *.ko
 	rm -f *.log
 	rm -rf logs
 	rm -f /tmp/mini_runtime.sock
 
-.PHONY: all module clean
+# Optional but useful for demo/testing
+install: module
+	sudo insmod monitor.ko
+
+uninstall:
+	sudo rmmod monitor
+
+.PHONY: all module clean install uninstall
