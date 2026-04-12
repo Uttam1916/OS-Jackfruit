@@ -672,18 +672,7 @@ if (req.kind == CMD_START || req.kind == CMD_RUN) {
     pthread_mutex_unlock(&ctx.metadata_lock);
 
     // Logging producer
-    while (1) {
-        log_item_t item;
-        ssize_t r = read(pipefd[0], item.data, LOG_CHUNK_SIZE);
-
-        if (r <= 0)
-            break;
-
-        strncpy(item.container_id, req.container_id, CONTAINER_ID_LEN - 1);
-        item.length = r;
-
-        bounded_buffer_push(&ctx.log_buffer, &item);
-    }
+  
 
     close(pipefd[0]);
 
