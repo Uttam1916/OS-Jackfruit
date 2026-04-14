@@ -79,6 +79,8 @@ typedef struct container_record {
     char log_path[PATH_MAX];
     struct container_record *next;
     void *stack;
+    int stop_requested;
+    char rootfs[PATH_MAX];
 } container_record_t;
 
 typedef struct {
@@ -465,7 +467,6 @@ int child_fn(void *arg)
             perror("setpriority");
         }
     }
-
     // Execute command
     execl("/bin/sh", "sh", "-c", cfg->command, NULL);
 
@@ -618,8 +619,6 @@ static int run_supervisor(const char *rootfs)
         goto cleanup;
     }
 
-    printf("Supervisor running (rootfs=%s)...\n", rootfs);
-
     /* 5) main event loop */
     while (!global_shutdown) {
         if (global_shutdown) break;
@@ -669,16 +668,30 @@ if (req.kind == CMD_START || req.kind == CMD_RUN) {
         close(client_fd);
         continue;
     }
+        container_record_t *tmp = ctx.containers;
+        while (tmp) {
+            if (strcmp(tmp->rootfs, req.rootfs) == 0 &&
+                tmp->state == CONTAINER_RUNNING) {
 
+                snprintf(resp.message, sizeof(resp.message),
+                        "Rootfs already in use\n");
+
+                (void)write(client_fd, &resp, sizeof(resp));
+                close(client_fd);
+
+                goto next_client;
+            }
+            tmp = tmp->next;
+        }
     pid_t pid = clone(child_fn,
                     (char *)stack + STACK_SIZE,
                     CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
                     cfg);
+    free(cfg);
     if (pid < 0) {
         perror("clone");
         close(pipefd[0]);
         close(pipefd[1]);
-        free(cfg);
         free(stack);
         close(client_fd);
         continue;
@@ -709,21 +722,28 @@ while (*cur) {
         break;
     }
     cur = &(*cur)->next;
+    next_client:
+;
 }
 
 container_record_t *rec = malloc(sizeof(*rec));
 memset(rec, 0, sizeof(*rec));
 
 strncpy(rec->id, req.container_id, CONTAINER_ID_LEN - 1);
+strncpy(rec->rootfs, req.rootfs, PATH_MAX - 1);   
+
 rec->host_pid = pid;
 rec->state = CONTAINER_RUNNING;
 rec->started_at = time(NULL);
 rec->soft_limit_bytes = req.soft_limit_bytes;
 rec->hard_limit_bytes = req.hard_limit_bytes;
+
+snprintf(rec->log_path, sizeof(rec->log_path),  
+         "%s/%s.log", LOG_DIR, rec->id);
+
 rec->next = ctx.containers;
 ctx.containers = rec;
 rec->stack = stack;
-
 pthread_mutex_unlock(&ctx.metadata_lock);
     // Logging producer
     producer_arg_t *p = malloc(sizeof(*p));
@@ -739,21 +759,15 @@ pthread_mutex_unlock(&ctx.metadata_lock);
     pthread_create(&tid, NULL, log_producer, p);
     pthread_detach(tid);
 
-    if (req.kind == CMD_RUN) {
-        int status;
-        waitpid(pid, &status, 0);
-        free(stack);
-        if (WIFEXITED(status))
-            snprintf(resp.message, sizeof(resp.message),
-                     "Exited with code %d\n", WEXITSTATUS(status));
-        else if (WIFSIGNALED(status))
-            snprintf(resp.message, sizeof(resp.message),
-                     "Killed by signal %d\n", WTERMSIG(status));
-    } else {
-        snprintf(resp.message, sizeof(resp.message),
-                 "Started container %s (pid=%d)\n",
-                 req.container_id, pid);
-    }
+if (req.kind == CMD_RUN) {
+    snprintf(resp.message, sizeof(resp.message),
+             "Running container %s (pid=%d)\n",
+             req.container_id, pid);
+} else {
+    snprintf(resp.message, sizeof(resp.message),
+             "Started container %s\n",
+             req.container_id);
+}
 }
 
 else if (req.kind == CMD_PS) {
@@ -785,7 +799,7 @@ else if (req.kind == CMD_STOP) {
 
     while (cur) {
         if (strcmp(cur->id, req.container_id) == 0) {
-
+            cur->stop_requested = 1;
             // send SIGTERM
             kill(cur->host_pid, SIGTERM);
 
@@ -833,7 +847,8 @@ else if (req.kind == CMD_LOGS) {
 }
 
 // send response
-write(client_fd, &resp, sizeof(resp));
+(void)write(client_fd, &resp, sizeof(resp));
+close(client_fd);
 
         // Reap children
         while (1) {
@@ -853,13 +868,16 @@ write(client_fd, &resp, sizeof(resp));
                         if (WIFEXITED(status)) {
                             cur->state = CONTAINER_EXITED;
                             cur->exit_code = WEXITSTATUS(status);
+                            cur->exit_signal = 0;
                         } else if (WIFSIGNALED(status)) {
                             cur->exit_signal = WTERMSIG(status);
 
-                            if (cur->exit_signal == SIGKILL)
+                            if (cur->stop_requested)
+                                cur->state = CONTAINER_STOPPED;
+                            else if (cur->exit_signal == SIGKILL)
                                 cur->state = CONTAINER_KILLED;
                             else
-                                cur->state = CONTAINER_STOPPED;
+                                cur->state = CONTAINER_EXITED;
                         }
                         if (cur->stack) {
                             free(cur->stack);
@@ -874,6 +892,16 @@ write(client_fd, &resp, sizeof(resp));
         }
     }
 
+
+pthread_mutex_lock(&ctx.metadata_lock);
+
+container_record_t *cur = ctx.containers;
+while (cur) {
+    kill(cur->host_pid, SIGTERM);
+    cur = cur->next;
+}
+
+pthread_mutex_unlock(&ctx.metadata_lock);    
 cleanup:
     ctx.shutting_down = 1;
     bounded_buffer_begin_shutdown(&ctx.log_buffer);

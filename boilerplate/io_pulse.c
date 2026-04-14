@@ -50,14 +50,11 @@ int main(int argc, char *argv[])
         int len = snprintf(line, sizeof(line), "io_pulse iteration=%u\n", i + 1);
 
         if (write(fd, line, (size_t)len) != len) {
-            perror("write");
             close(fd);
             return 1;
         }
 
         fsync(fd);
-        printf("io_pulse wrote iteration=%u\n", i + 1);
-        fflush(stdout);
         usleep(sleep_ms * 1000U);
     }
 
