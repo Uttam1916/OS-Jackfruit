@@ -78,6 +78,7 @@ typedef struct container_record {
     int exit_signal;
     char log_path[PATH_MAX];
     struct container_record *next;
+    void *stack;
 } container_record_t;
 
 typedef struct {
@@ -130,6 +131,12 @@ typedef struct {
     pthread_mutex_t metadata_lock;
     container_record_t *containers;
 } supervisor_ctx_t;
+
+typedef struct {
+    int fd;
+    char container_id[CONTAINER_ID_LEN];
+    supervisor_ctx_t *ctx;
+} producer_arg_t;
 
 static void usage(const char *prog)
 {
@@ -519,6 +526,31 @@ static void handle_signal(int sig)
     global_shutdown = 1;
 }
 
+void *log_producer(void *arg) {
+    producer_arg_t *p = arg;
+
+    log_item_t item;
+
+    mkdir(LOG_DIR, 0755);
+
+    while (1) {
+    ssize_t r = read(p->fd, item.data, LOG_CHUNK_SIZE);
+    if (r <= 0) break;
+
+    item.length = r;
+
+    strncpy(item.container_id, p->container_id, CONTAINER_ID_LEN);
+    item.container_id[CONTAINER_ID_LEN - 1] = '\0';
+
+    if (bounded_buffer_push(&p->ctx->log_buffer, &item) != 0)
+    break;
+}
+
+    close(p->fd);
+    free(p);
+    return NULL;
+}
+
 static int run_supervisor(const char *rootfs)
 {
     supervisor_ctx_t ctx;
@@ -577,7 +609,8 @@ static int run_supervisor(const char *rootfs)
     /* 3) install signal handlers */
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
-    signal(SIGCHLD, SIG_IGN); // we'll still use waitpid loop
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_DFL);
 
     /* 4) spawn logger thread */
     if (pthread_create(&ctx.logger_thread, NULL, logging_thread, &ctx) != 0) {
@@ -589,12 +622,10 @@ static int run_supervisor(const char *rootfs)
 
     /* 5) main event loop */
     while (!global_shutdown) {
-
+        if (global_shutdown) break;
         int client_fd = accept(ctx.server_fd, NULL, NULL);
         if (client_fd < 0) {
-            if (errno == EINTR)
-                continue;
-            perror("accept");
+            if (errno == EINTR) continue;
             break;
         }
 
@@ -630,12 +661,19 @@ if (req.kind == CMD_START || req.kind == CMD_RUN) {
     cfg->log_write_fd = pipefd[1];
 
     void *stack = malloc(STACK_SIZE);
+    if (!stack) {
+        perror("malloc stack");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        free(cfg);
+        close(client_fd);
+        continue;
+    }
 
     pid_t pid = clone(child_fn,
-                      stack + STACK_SIZE,
-                      CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
-                      cfg);
-
+                    (char *)stack + STACK_SIZE,
+                    CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                    cfg);
     if (pid < 0) {
         perror("clone");
         close(pipefd[0]);
@@ -658,28 +696,53 @@ if (req.kind == CMD_START || req.kind == CMD_RUN) {
     }
 
     // Add metadata
-    container_record_t *rec = malloc(sizeof(*rec));
-    memset(rec, 0, sizeof(*rec));
-
-    strncpy(rec->id, req.container_id, CONTAINER_ID_LEN - 1);
-    rec->host_pid = pid;
-    rec->state = CONTAINER_RUNNING;
-    rec->started_at = time(NULL);
-
     pthread_mutex_lock(&ctx.metadata_lock);
-    rec->next = ctx.containers;
-    ctx.containers = rec;
-    pthread_mutex_unlock(&ctx.metadata_lock);
 
+    // check if already exists → remove old
+container_record_t **cur = &ctx.containers;
+while (*cur) {
+    if (strcmp((*cur)->id, req.container_id) == 0) {
+        container_record_t *tmp = *cur;
+        *cur = tmp->next;
+        if (tmp->stack) free(tmp->stack);
+        free(tmp);
+        break;
+    }
+    cur = &(*cur)->next;
+}
+
+container_record_t *rec = malloc(sizeof(*rec));
+memset(rec, 0, sizeof(*rec));
+
+strncpy(rec->id, req.container_id, CONTAINER_ID_LEN - 1);
+rec->host_pid = pid;
+rec->state = CONTAINER_RUNNING;
+rec->started_at = time(NULL);
+rec->soft_limit_bytes = req.soft_limit_bytes;
+rec->hard_limit_bytes = req.hard_limit_bytes;
+rec->next = ctx.containers;
+ctx.containers = rec;
+rec->stack = stack;
+
+pthread_mutex_unlock(&ctx.metadata_lock);
     // Logging producer
-  
-
+    producer_arg_t *p = malloc(sizeof(*p));
+    if (!p) {
     close(pipefd[0]);
+    return 1;
+}
+    p->fd = pipefd[0];
+    p->ctx = &ctx;
+    strncpy(p->container_id, req.container_id, CONTAINER_ID_LEN);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, log_producer, p);
+    pthread_detach(tid);
 
     if (req.kind == CMD_RUN) {
         int status;
         waitpid(pid, &status, 0);
-
+        free(stack);
         if (WIFEXITED(status))
             snprintf(resp.message, sizeof(resp.message),
                      "Exited with code %d\n", WEXITSTATUS(status));
@@ -714,7 +777,6 @@ else if (req.kind == CMD_PS) {
 
     strncpy(resp.message, buf, sizeof(resp.message) - 1);
 }
-
 else if (req.kind == CMD_STOP) {
 
     pthread_mutex_lock(&ctx.metadata_lock);
@@ -723,18 +785,36 @@ else if (req.kind == CMD_STOP) {
 
     while (cur) {
         if (strcmp(cur->id, req.container_id) == 0) {
+
+            // send SIGTERM
             kill(cur->host_pid, SIGTERM);
+
+            // unregister from monitor
+            if (ctx.monitor_fd >= 0) {
+                unregister_from_monitor(ctx.monitor_fd,
+                                        cur->id,
+                                        cur->host_pid);
+            }
+
+
+
             cur->state = CONTAINER_STOPPED;
+
             snprintf(resp.message, sizeof(resp.message),
                      "Stopped %s\n", cur->id);
+
             break;
         }
         cur = cur->next;
     }
 
+    if (!cur) {
+        snprintf(resp.message, sizeof(resp.message),
+                 "Container not found\n");
+    }
+
     pthread_mutex_unlock(&ctx.metadata_lock);
 }
-
 else if (req.kind == CMD_LOGS) {
 
     char path[PATH_MAX];
@@ -753,10 +833,7 @@ else if (req.kind == CMD_LOGS) {
 }
 
 // send response
-if (write(client_fd, &resp, sizeof(resp)) < 0) {
-    perror("write");
-}
-close(client_fd);
+write(client_fd, &resp, sizeof(resp));
 
         // Reap children
         while (1) {
@@ -766,6 +843,34 @@ close(client_fd);
                 break;
 
             // TODO: update metadata
+            pthread_mutex_lock(&ctx.metadata_lock);
+
+            container_record_t *cur = ctx.containers;
+
+            while (cur) {
+                    if (cur->host_pid == pid) {
+
+                        if (WIFEXITED(status)) {
+                            cur->state = CONTAINER_EXITED;
+                            cur->exit_code = WEXITSTATUS(status);
+                        } else if (WIFSIGNALED(status)) {
+                            cur->exit_signal = WTERMSIG(status);
+
+                            if (cur->exit_signal == SIGKILL)
+                                cur->state = CONTAINER_KILLED;
+                            else
+                                cur->state = CONTAINER_STOPPED;
+                        }
+                        if (cur->stack) {
+                            free(cur->stack);
+                            cur->stack = NULL;
+                        }
+                        break;
+                    }
+                    cur = cur->next;
+                }
+
+                pthread_mutex_unlock(&ctx.metadata_lock);
         }
     }
 
@@ -826,14 +931,14 @@ static int send_control_request(const control_request_t *req)
         return 1;
     }
 
-    // Receive simple response (optional but useful)
-    char response[512];
-    n = read(fd, response, sizeof(response) - 1);
-    if (n > 0) {
-        response[n] = '\0';
-        printf("%s", response);
-    }
+    control_response_t resp;
+    n = read(fd, &resp, sizeof(resp));
 
+    if (n == sizeof(resp)) {
+        printf("%s", resp.message);
+    } else {
+        fprintf(stderr, "Invalid response from supervisor\n");
+    }
     close(fd);
     return 0;
 }
@@ -888,6 +993,11 @@ static int cmd_run(int argc, char *argv[])
     return send_control_request(&req);
 }
 
+    /*
+     * TODO:
+     * The supervisor should respond with container metadata.
+     * Keep the rendering format simple enough for demos and debugging.
+     */
 static int cmd_ps(void)
 {
     control_request_t req;
@@ -895,17 +1005,6 @@ static int cmd_ps(void)
     memset(&req, 0, sizeof(req));
     req.kind = CMD_PS;
 
-    /*
-     * TODO:
-     * The supervisor should respond with container metadata.
-     * Keep the rendering format simple enough for demos and debugging.
-     */
-    printf("Expected states include: %s, %s, %s, %s, %s\n",
-           state_to_string(CONTAINER_STARTING),
-           state_to_string(CONTAINER_RUNNING),
-           state_to_string(CONTAINER_STOPPED),
-           state_to_string(CONTAINER_KILLED),
-           state_to_string(CONTAINER_EXITED));
     return send_control_request(&req);
 }
 
