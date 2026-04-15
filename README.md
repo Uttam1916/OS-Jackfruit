@@ -136,14 +136,56 @@ dmesg | tail -20
 
 ### Step 5: Cleanup
 
-Stop all containers via supervisor termination (Ctrl+C) or explicit:
+There are several methods to stop the supervisor:
+
+**Method 1: SIGTERM via process ID (recommended for backgrounded supervisor)**
 
 ```bash
-sudo ./boilerplate/engine stop beta
-sudo ./boilerplate/engine stop gamma
+# Find the supervisor process ID
+SUPER_PID=$(pgrep -f "engine supervisor")
+
+# Send SIGTERM to gracefully shut down
+sudo kill -TERM $SUPER_PID
+
+# Or send SIGINT (same as Ctrl+C)
+sudo kill -INT $SUPER_PID
+
+# Wait for cleanup
+sleep 2
 ```
 
-Unload kernel module:
+**Method 2: Kill by process name**
+
+```bash
+# Gracefully terminate supervisors
+sudo killall -TERM engine
+
+# Or kill immediately if graceful doesn't work
+sudo killall -9 engine
+```
+
+**Method 3: Ctrl+C (foreground supervisor only)**
+
+If supervisor is running in foreground:
+
+```bash
+# Press Ctrl+C in the supervisor terminal
+# This sends SIGINT and triggers graceful shutdown
+```
+
+**Method 4: Stop containers individually, then supervisor**
+
+```bash
+# Stop all containers explicitly
+sudo ./boilerplate/engine stop alpha
+sudo ./boilerplate/engine stop beta
+
+# Then kill the supervisor (processes will be reaped cleanly)
+SUPER_PID=$(pgrep -f "engine supervisor")
+sudo kill -TERM $SUPER_PID
+```
+
+**After supervisor is stopped, unload kernel module:**
 
 ```bash
 sudo rmmod monitor
@@ -691,12 +733,6 @@ If containers remain, stop them explicitly:
 ```bash
 sudo ./boilerplate/engine stop <id>
 ```
-
-## References
-
-- Linux man pages: clone(2), chroot(2), pthread_cond(3), ioctl(2)
-- Linux kernel documentation: Namespaces, Process Accounting, Memory Management
-- Linux Scheduler: CFS documentation in Linux kernel source
 
 ## License
 

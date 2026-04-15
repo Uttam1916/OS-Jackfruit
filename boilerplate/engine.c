@@ -590,6 +590,10 @@ static int run_supervisor(const char *rootfs)
         goto cleanup;
     }
 
+    /* Make socket non-blocking so accept() can be interrupted by signals */
+    int flags = fcntl(ctx.server_fd, F_GETFL, 0);
+    fcntl(ctx.server_fd, F_SETFL, flags | O_NONBLOCK);
+
     unlink(SOCKET_PATH);
 
     struct sockaddr_un addr;
@@ -625,6 +629,11 @@ static int run_supervisor(const char *rootfs)
         int client_fd = accept(ctx.server_fd, NULL, NULL);
         if (client_fd < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* No pending connections, check shutdown flag and sleep briefly */
+                usleep(100000);  /* 100ms */
+                continue;
+            }
             break;
         }
 
@@ -971,6 +980,13 @@ static int send_control_request(const control_request_t *req)
     return 0;
 }
 
+static int is_engine_flag(const char *arg)
+{
+    return strcmp(arg, "--soft-mib") == 0 ||
+           strcmp(arg, "--hard-mib") == 0 ||
+           strcmp(arg, "--nice") == 0;
+}
+
 static int cmd_start(int argc, char *argv[])
 {
     control_request_t req;
@@ -994,7 +1010,7 @@ static int cmd_start(int argc, char *argv[])
 
     // Combine command and its arguments into a single string
     cmd_ptr = req.command;
-    for (i = 4; i < argc && argv[i][0] != '-'; i++) {
+    for (i = 4; i < argc && !is_engine_flag(argv[i]); i++) {
         if (i > 4) {
             // Add space between arguments
             if (cmd_len + 1 >= sizeof(req.command)) {
@@ -1042,7 +1058,7 @@ static int cmd_run(int argc, char *argv[])
 
     // Combine command and its arguments into a single string
     cmd_ptr = req.command;
-    for (i = 4; i < argc && argv[i][0] != '-'; i++) {
+    for (i = 4; i < argc && !is_engine_flag(argv[i]); i++) {
         if (i > 4) {
             // Add space between arguments
             if (cmd_len + 1 >= sizeof(req.command)) {
