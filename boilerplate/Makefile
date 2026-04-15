@@ -34,7 +34,7 @@ clean:
 	rm -f $(USER_TARGETS) *.o *.mod *.mod.c *.symvers *.order *.ko
 	rm -f *.log
 	rm -rf logs
-	rm -f /tmp/mini_runtime.sock
+	rm -f /tmp/mini_runtime.sock || true
 
 # Optional but useful for demo/testing
 install: module

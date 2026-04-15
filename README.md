@@ -162,29 +162,60 @@ Starts the long-running supervisor daemon. Remains active until SIGINT/SIGTERM.
 ### Start Container (Background)
 
 ```bash
-engine start <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]
+engine start <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]
 ```
 
 Launches a container and immediately returns. Returns after supervisor accepts and records metadata.
 
-Example:
+- **id**: Unique container identifier (max 31 characters)
+- **container-rootfs**: Writable rootfs copy (must be unique per container)
+- **command...**: Command and arguments (multiple arguments supported)
+- **--soft-mib N**: Soft memory limit in MiB (default: 40)
+- **--hard-mib N**: Hard memory limit in MiB (default: 64)
+- **--nice N**: CPU priority -20..19 (default: 0)
+
+Examples:
 
 ```bash
-engine start webserver ./rootfs-web nginx --soft-mib 128 --hard-mib 256 --nice -5
+# Simple command with single argument
+engine start web ./rootfs-web /bin/sleep 300
+
+# Command with multiple arguments
+engine start app ./rootfs-app /memory_hog 2 100 --soft-mib 32 --hard-mib 64
+
+# Command with shell options
+engine start batch ./rootfs-batch /bin/sh -c "echo hello && sleep 10"
+
+# With custom priority
+engine start worker ./rootfs-worker /cpu_hog 15 --nice 5
 ```
 
 ### Run Container (Foreground)
 
 ```bash
-engine run <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]
+engine run <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]
 ```
 
-Launches a container and blocks until it exits. Returns container's exit status.
+Launches a container and blocks until it exits. Returns container's exit status (0-255 or 128+signal).
 
-Example:
+- Same parameters as `start` command
+- Waits for container to exit before returning
+- Exit code reflects container's exit status
+
+Examples:
 
 ```bash
-engine run test1 ./rootfs-test /memory_hog --soft-mib 32 --hard-mib 64
+# Simple sleep container
+engine run test1 ./rootfs-test /bin/sleep 10
+
+# Command with multiple arguments
+engine run test2 ./rootfs-test /memory_hog 2 100 --soft-mib 32 --hard-mib 64
+
+# With shell command
+engine run test3 ./rootfs-test /bin/sh -c "for i in 1 2 3; do echo $i; done"
+
+# With custom limits
+engine run memtest ./rootfs-test /memory_hog 1 50 --soft-mib 16 --hard-mib 64
 ```
 
 ### List Containers
@@ -220,8 +251,8 @@ Sends SIGTERM to container process and marks it stopped. Updates supervisor meta
 sudo ./boilerplate/engine supervisor ./rootfs-base
 
 # Terminal 2
-sudo ./boilerplate/engine start alpha ./rootfs-alpha 'sh -c "while true; do sleep 1; done"'
-sudo ./boilerplate/engine start beta ./rootfs-beta 'sh -c "while true; do sleep 1; done"'
+sudo ./boilerplate/engine start alpha ./rootfs-alpha /bin/sh -c "while true; do sleep 1; echo working; done"
+sudo ./boilerplate/engine start beta ./rootfs-beta /bin/sh -c "while true; do sleep 1; echo working; done"
 sudo ./boilerplate/engine ps
 ```
 
@@ -230,7 +261,7 @@ Verify both containers appear with different PIDs and running state.
 ### Scenario 2: Bounded-Buffer Logging
 
 ```bash
-sudo ./boilerplate/engine run test1 ./rootfs-alpha 'sh -c "for i in 1 2 3 4 5; do echo Line $i; sleep 0.1; done"'
+sudo ./boilerplate/engine run test1 ./rootfs-alpha /bin/sh -c "for i in 1 2 3 4 5; do echo Line $i; sleep 0.1; done"
 sudo ./boilerplate/engine logs test1
 cat boilerplate/logs/test1.log
 ```

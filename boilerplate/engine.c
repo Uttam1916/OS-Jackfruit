@@ -974,10 +974,13 @@ static int send_control_request(const control_request_t *req)
 static int cmd_start(int argc, char *argv[])
 {
     control_request_t req;
+    int i;
+    size_t cmd_len = 0;
+    char *cmd_ptr;
 
     if (argc < 5) {
         fprintf(stderr,
-                "Usage: %s start <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]\n",
+                "Usage: %s start <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]\n",
                 argv[0]);
         return 1;
     }
@@ -986,11 +989,31 @@ static int cmd_start(int argc, char *argv[])
     req.kind = CMD_START;
     strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
     strncpy(req.rootfs, argv[3], sizeof(req.rootfs) - 1);
-    strncpy(req.command, argv[4], sizeof(req.command) - 1);
     req.soft_limit_bytes = DEFAULT_SOFT_LIMIT;
     req.hard_limit_bytes = DEFAULT_HARD_LIMIT;
 
-    if (parse_optional_flags(&req, argc, argv, 5) != 0)
+    // Combine command and its arguments into a single string
+    cmd_ptr = req.command;
+    for (i = 4; i < argc && argv[i][0] != '-'; i++) {
+        if (i > 4) {
+            // Add space between arguments
+            if (cmd_len + 1 >= sizeof(req.command)) {
+                fprintf(stderr, "Command too long\n");
+                return 1;
+            }
+            cmd_ptr += snprintf(cmd_ptr, sizeof(req.command) - cmd_len, " ");
+            cmd_len += strlen(" ");
+        }
+        size_t arg_len = strlen(argv[i]);
+        if (cmd_len + arg_len >= sizeof(req.command)) {
+            fprintf(stderr, "Command too long\n");
+            return 1;
+        }
+        cmd_ptr += snprintf(cmd_ptr, sizeof(req.command) - cmd_len, "%s", argv[i]);
+        cmd_len += arg_len;
+    }
+
+    if (parse_optional_flags(&req, argc, argv, i) != 0)
         return 1;
 
     return send_control_request(&req);
@@ -999,10 +1022,13 @@ static int cmd_start(int argc, char *argv[])
 static int cmd_run(int argc, char *argv[])
 {
     control_request_t req;
+    int i;
+    size_t cmd_len = 0;
+    char *cmd_ptr;
 
     if (argc < 5) {
         fprintf(stderr,
-                "Usage: %s run <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]\n",
+                "Usage: %s run <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]\n",
                 argv[0]);
         return 1;
     }
@@ -1011,11 +1037,31 @@ static int cmd_run(int argc, char *argv[])
     req.kind = CMD_RUN;
     strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
     strncpy(req.rootfs, argv[3], sizeof(req.rootfs) - 1);
-    strncpy(req.command, argv[4], sizeof(req.command) - 1);
     req.soft_limit_bytes = DEFAULT_SOFT_LIMIT;
     req.hard_limit_bytes = DEFAULT_HARD_LIMIT;
 
-    if (parse_optional_flags(&req, argc, argv, 5) != 0)
+    // Combine command and its arguments into a single string
+    cmd_ptr = req.command;
+    for (i = 4; i < argc && argv[i][0] != '-'; i++) {
+        if (i > 4) {
+            // Add space between arguments
+            if (cmd_len + 1 >= sizeof(req.command)) {
+                fprintf(stderr, "Command too long\n");
+                return 1;
+            }
+            cmd_ptr += snprintf(cmd_ptr, sizeof(req.command) - cmd_len, " ");
+            cmd_len += strlen(" ");
+        }
+        size_t arg_len = strlen(argv[i]);
+        if (cmd_len + arg_len >= sizeof(req.command)) {
+            fprintf(stderr, "Command too long\n");
+            return 1;
+        }
+        cmd_ptr += snprintf(cmd_ptr, sizeof(req.command) - cmd_len, "%s", argv[i]);
+        cmd_len += arg_len;
+    }
+
+    if (parse_optional_flags(&req, argc, argv, i) != 0)
         return 1;
 
     return send_control_request(&req);
