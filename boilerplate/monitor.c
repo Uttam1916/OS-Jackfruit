@@ -47,7 +47,7 @@
 
 struct monitor_entry {
     pid_t pid;
-    char container_id[64];
+    char container_id[MONITOR_NAME_LEN];
 
     unsigned long soft_limit;
     unsigned long hard_limit;

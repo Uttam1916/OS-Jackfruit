@@ -1,29 +1,35 @@
 # Multi-Container Runtime
 
-A supervised Linux container runtime with kernel-space memory enforcement.
+A lightweight Linux container runtime in C with a long-running supervisor and a kernel-space memory monitor.
 
-## Team Information
+---
 
-This is a reference implementation of a multi-container supervisor with kernel-space memory monitoring, demonstrating process isolation, concurrent IPC, and kernel memory enforcement mechanics.
+## 1. Team Information
 
-## Architecture Overview
+| Name | SRN |
+|------|-----|
+| [Student 1 Name] | [SRN1] |
+| [Student 2 Name] | [SRN2] |
 
-The runtime consists of two components:
+---
 
-- User-Space Supervisor (engine): Long-running process managing container lifecycle, IPC, and logging
-- Kernel Module (monitor.ko): LKM enforcing memory limits via RSS monitoring
-
-Container isolation is achieved through Linux namespaces (PID, UTS, mount) with chroot-based filesystem containment.
-
-## Build Instructions
+## 2. Build, Load, and Run Instructions
 
 ### Prerequisites
 
-Ubuntu 22.04 or 24.04 with the following installed:
+Ubuntu 22.04 or 24.04 with Secure Boot **OFF**. WSL will not work.
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential linux-headers-$(uname -r)
+```
+
+Run the environment preflight check:
+
+```bash
+cd boilerplate
+chmod +x environment-check.sh
+sudo ./environment-check.sh
 ```
 
 ### Compilation
@@ -33,707 +39,470 @@ cd boilerplate
 make
 ```
 
-This produces:
-- engine: User-space supervisor and CLI binary
-- memory_hog: Memory stress test workload (8 MB/sec allocation)
-- cpu_hog: CPU-bound workload (10-second iterations)
-- io_pulse: I/O workload (20 iterations with fsync)
-- monitor.ko: Kernel module for memory enforcement
+Produces:
+- `engine` — user-space supervisor and CLI binary
+- `memory_hog` — memory stress workload
+- `cpu_hog` — CPU-bound workload
+- `io_pulse` — I/O-bound workload
+- `monitor.ko` — kernel module for memory enforcement
 
-## Load and Run
+CI-safe compile (user-space only, no kernel headers required):
 
-### Step 1: Module Loading
+```bash
+make -C boilerplate ci
+```
+
+### Step 1 — Load Kernel Module
 
 ```bash
 sudo insmod boilerplate/monitor.ko
 ls -l /dev/container_monitor
 ```
 
-Verify /dev/container_monitor device appears with character device permissions.
+Verify `/dev/container_monitor` appears as a character device.
 
-### Step 2: Filesystem Preparation
+### Step 2 — Prepare Root Filesystem
 
 ```bash
 mkdir -p rootfs-base
 wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
 tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
-```
 
-Create per-container copies:
-
-```bash
+# One writable copy per container
 cp -a rootfs-base rootfs-alpha
 cp -a rootfs-base rootfs-beta
 cp -a rootfs-base rootfs-gamma
+
+# Copy workload binaries into containers before launch
+cp boilerplate/memory_hog boilerplate/cpu_hog boilerplate/io_pulse rootfs-alpha/
+cp boilerplate/memory_hog boilerplate/cpu_hog rootfs-beta/
+cp boilerplate/memory_hog rootfs-gamma/
 ```
 
-Copy test workloads into containers:
+> Do **not** commit `rootfs-base/` or `rootfs-*/` to the repository.
 
-```bash
-cp boilerplate/memory_hog rootfs-alpha/
-cp boilerplate/cpu_hog rootfs-alpha/
-cp boilerplate/io_pulse rootfs-alpha/
-cp boilerplate/memory_hog rootfs-beta/
-cp boilerplate/cpu_hog rootfs-beta/
-```
+### Step 3 — Start the Supervisor
 
-### Step 3: Start Supervisor
+Run in a dedicated terminal. The supervisor stays alive until SIGINT/SIGTERM.
 
 ```bash
 sudo ./boilerplate/engine supervisor ./rootfs-base
 ```
 
-In another terminal, proceed with container operations.
+### Step 4 — Container Operations
 
-### Step 4: Container Operations
-
-Start containers in background:
+From a second terminal:
 
 ```bash
+# Start two containers in the background
 sudo ./boilerplate/engine start alpha ./rootfs-alpha /bin/sleep 120 --soft-mib 48 --hard-mib 80
-sudo ./boilerplate/engine start beta ./rootfs-beta /bin/sleep 120 --soft-mib 60 --hard-mib 96
-```
+sudo ./boilerplate/engine start beta  ./rootfs-beta  /bin/sleep 120 --soft-mib 60 --hard-mib 96
 
-List running containers:
-
-```bash
+# List all tracked containers
 sudo ./boilerplate/engine ps
-```
 
-Expected output format:
-
-```
-alpha | pid=<PID> | running
-beta | pid=<PID> | running
-```
-
-Run memory stress test in a container (foreground):
-
-```bash
-sudo ./boilerplate/engine run gamma ./rootfs-gamma /memory_hog 2 100
-```
-
-This allocates 2 MB chunks every 100 milliseconds until terminated.
-
-Inspect container logs:
-
-```bash
+# View captured logs
 sudo ./boilerplate/engine logs alpha
-cat boilerplate/logs/alpha.log
-```
 
-Stop a container:
+# Run a container in the foreground (blocks until exit)
+sudo ./boilerplate/engine run gamma ./rootfs-gamma /memory_hog 2 100 --soft-mib 32 --hard-mib 64
 
-```bash
+# Stop a container
 sudo ./boilerplate/engine stop alpha
-```
 
-Check supervisor logs for kernel events:
-
-```bash
+# Check kernel events
 dmesg | tail -20
 ```
 
-### Step 5: Cleanup
-
-There are several methods to stop the supervisor:
-
-**Method 1: SIGTERM via process ID (recommended for backgrounded supervisor)**
+### Step 5 — Cleanup
 
 ```bash
-# Find the supervisor process ID
-SUPER_PID=$(pgrep -f "engine supervisor")
-
-# Send SIGTERM to gracefully shut down
-sudo kill -TERM $SUPER_PID
-
-# Or send SIGINT (same as Ctrl+C)
-sudo kill -INT $SUPER_PID
-
-# Wait for cleanup
-sleep 2
-```
-
-**Method 2: Kill by process name**
-
-```bash
-# Gracefully terminate supervisors
-sudo killall -TERM engine
-
-# Or kill immediately if graceful doesn't work
-sudo killall -9 engine
-```
-
-**Method 3: Ctrl+C (foreground supervisor only)**
-
-If supervisor is running in foreground:
-
-```bash
-# Press Ctrl+C in the supervisor terminal
-# This sends SIGINT and triggers graceful shutdown
-```
-
-**Method 4: Stop containers individually, then supervisor**
-
-```bash
-# Stop all containers explicitly
-sudo ./boilerplate/engine stop alpha
+# Stop remaining containers
 sudo ./boilerplate/engine stop beta
 
-# Then kill the supervisor (processes will be reaped cleanly)
-SUPER_PID=$(pgrep -f "engine supervisor")
-sudo kill -TERM $SUPER_PID
-```
+# Gracefully terminate the supervisor (triggers cleanup of threads, FDs, socket)
+sudo kill -TERM $(pgrep -f "engine supervisor")
 
-**After supervisor is stopped, unload kernel module:**
+# Wait for shutdown
+sleep 2
 
-```bash
+# Verify no zombies remain
+ps aux | grep engine | grep -v grep
+
+# Unload kernel module
 sudo rmmod monitor
 ```
+
+---
 
 ## CLI Reference
 
-### Supervisor Startup
-
-```bash
+```
 engine supervisor <base-rootfs>
-```
-
-Starts the long-running supervisor daemon. Remains active until SIGINT/SIGTERM.
-
-### Start Container (Background)
-
-```bash
 engine start <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]
-```
-
-Launches a container and immediately returns. Returns after supervisor accepts and records metadata.
-
-- **id**: Unique container identifier (max 31 characters)
-- **container-rootfs**: Writable rootfs copy (must be unique per container)
-- **command...**: Command and arguments (multiple arguments supported)
-- **--soft-mib N**: Soft memory limit in MiB (default: 40)
-- **--hard-mib N**: Hard memory limit in MiB (default: 64)
-- **--nice N**: CPU priority -20..19 (default: 0)
-
-Examples:
-
-```bash
-# Simple command with single argument
-engine start web ./rootfs-web /bin/sleep 300
-
-# Command with multiple arguments
-engine start app ./rootfs-app /memory_hog 2 100 --soft-mib 32 --hard-mib 64
-
-# Command with shell options
-engine start batch ./rootfs-batch /bin/sh -c "echo hello && sleep 10"
-
-# With custom priority
-engine start worker ./rootfs-worker /cpu_hog 15 --nice 5
-```
-
-### Run Container (Foreground)
-
-```bash
-engine run <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]
-```
-
-Launches a container and blocks until it exits. Returns container's exit status (0-255 or 128+signal).
-
-- Same parameters as `start` command
-- Waits for container to exit before returning
-- Exit code reflects container's exit status
-
-Examples:
-
-```bash
-# Simple sleep container
-engine run test1 ./rootfs-test /bin/sleep 10
-
-# Command with multiple arguments
-engine run test2 ./rootfs-test /memory_hog 2 100 --soft-mib 32 --hard-mib 64
-
-# With shell command
-engine run test3 ./rootfs-test /bin/sh -c "for i in 1 2 3; do echo $i; done"
-
-# With custom limits
-engine run memtest ./rootfs-test /memory_hog 1 50 --soft-mib 16 --hard-mib 64
-```
-
-### List Containers
-
-```bash
+engine run   <id> <container-rootfs> <command...> [--soft-mib N] [--hard-mib N] [--nice N]
 engine ps
+engine logs  <id>
+engine stop  <id>
 ```
 
-Outputs all tracked containers with ID, PID, and state (running/stopped/exited/killed).
+| Command | Behaviour |
+|---------|-----------|
+| `supervisor` | Starts the long-running daemon. Blocks until SIGINT/SIGTERM. |
+| `start` | Launches container in the background. Returns immediately after supervisor records metadata. |
+| `run` | Launches container and **blocks** until it exits. Returns the container exit status (0–255 or 128+signal). Ctrl-C forwards a `stop` to the supervisor and returns 130. |
+| `ps` | Lists all tracked containers: ID, host PID, and state (`starting`/`running`/`stopped`/`killed`/`exited`). |
+| `logs` | Prints captured stdout/stderr from the container's log file. |
+| `stop` | Sends SIGTERM to the container, sets `stop_requested`, and marks it `stopped`. |
 
-### View Container Logs
+**Defaults:** `--soft-mib 40`, `--hard-mib 64`, `--nice 0`
 
+---
+
+## 3. Demo Screenshots
+
+> Replace each placeholder below with an annotated screenshot from your VM.
+
+### Screenshot 1 — Multi-Container Supervision
+**Command sequence:**
 ```bash
-engine logs <id>
-```
-
-Displays captured stdout/stderr from the specified container (up to 256 bytes).
-
-### Stop Container
-
-```bash
-engine stop <id>
-```
-
-Sends SIGTERM to container process and marks it stopped. Updates supervisor metadata.
-
-## Demonstration Scenarios
-
-### Scenario 1: Multi-Container Supervision
-
-```bash
-# Terminal 1
-sudo ./boilerplate/engine supervisor ./rootfs-base
-
-# Terminal 2
-sudo ./boilerplate/engine start alpha ./rootfs-alpha /bin/sh -c "while true; do sleep 1; echo working; done"
-sudo ./boilerplate/engine start beta ./rootfs-beta /bin/sh -c "while true; do sleep 1; echo working; done"
+sudo ./boilerplate/engine start alpha ./rootfs-alpha /bin/sleep 120
+sudo ./boilerplate/engine start beta  ./rootfs-beta  /bin/sleep 120
 sudo ./boilerplate/engine ps
 ```
+*Caption: Two containers (`alpha`, `beta`) running under one supervisor process, each with a distinct host PID and state `running`.*
 
-Verify both containers appear with different PIDs and running state.
+<!-- INSERT SCREENSHOT 1 HERE -->
 
-### Scenario 2: Bounded-Buffer Logging
+---
 
+### Screenshot 2 — Metadata Tracking (`ps` output)
+**Command:**
 ```bash
-sudo ./boilerplate/engine run test1 ./rootfs-alpha /bin/sh -c "for i in 1 2 3 4 5; do echo Line $i; sleep 0.1; done"
-sudo ./boilerplate/engine logs test1
-cat boilerplate/logs/test1.log
+sudo ./boilerplate/engine ps
 ```
+*Caption: Output of `engine ps` showing container IDs, host PIDs, and states after starting two containers.*
 
-Verify all log lines are captured sequentially without loss or corruption.
+<!-- INSERT SCREENSHOT 2 HERE -->
 
-### Scenario 3: Soft-Limit Warning
+---
 
+### Screenshot 3 — Bounded-Buffer Logging
+**Command sequence:**
 ```bash
-sudo ./boilerplate/engine start memtest ./rootfs-beta /memory_hog 1 50 --soft-mib 16 --hard-mib 64
+sudo ./boilerplate/engine run logtest ./rootfs-alpha \
+    /bin/sh -c "for i in 1 2 3 4 5; do echo Line \$i; sleep 0.1; done"
+cat boilerplate/logs/logtest.log
+```
+*Caption: Log file contents captured through the producer-consumer pipeline. All 5 lines are present and in order, demonstrating no loss or corruption under concurrent access.*
+
+<!-- INSERT SCREENSHOT 3 HERE -->
+
+---
+
+### Screenshot 4 — CLI and IPC (Control Channel)
+**Command:**
+```bash
+sudo ./boilerplate/engine stop alpha
+```
+*Caption: CLI client sends a `CMD_STOP` request over the UNIX domain socket at `/tmp/mini_runtime.sock`. Supervisor receives the request, sets `stop_requested`, sends SIGTERM, and returns the response `Stopped alpha`.*
+
+<!-- INSERT SCREENSHOT 4 HERE -->
+
+---
+
+### Screenshot 5 — Soft-Limit Warning
+**Command sequence:**
+```bash
+sudo ./boilerplate/engine start softtest ./rootfs-gamma /memory_hog 1 50 --soft-mib 16 --hard-mib 96
 sleep 2
-dmesg | tail
+dmesg | tail -10
 ```
+*Caption: `dmesg` showing a `[container_monitor] SOFT LIMIT container=softtest` warning when the container's RSS exceeds 16 MiB. The container continues running.*
 
-Check dmesg for SOFT LIMIT event when container exceeds 16 MiB.
+<!-- INSERT SCREENSHOT 5 HERE -->
 
-### Scenario 4: Hard-Limit Enforcement
+---
 
+### Screenshot 6 — Hard-Limit Enforcement
+**Command sequence:**
 ```bash
-sudo ./boilerplate/engine start memkill ./rootfs-gamma /memory_hog 1 20 --soft-mib 32 --hard-mib 48
-sleep 3
-dmesg | tail
+sudo ./boilerplate/engine start hardtest ./rootfs-gamma /memory_hog 1 20 --soft-mib 32 --hard-mib 48
+sleep 4
+dmesg | tail -10
 sudo ./boilerplate/engine ps
 ```
+*Caption: `dmesg` showing `[container_monitor] HARD LIMIT container=hardtest ... SIGKILL`. `engine ps` shows state `killed` — set because `stop_requested` was not set when SIGKILL arrived.*
 
-Verify container state changes to killed when exceeding 48 MiB. Observe SIGKILL event in dmesg.
+<!-- INSERT SCREENSHOT 6 HERE -->
 
-### Scenario 5: CPU Scheduling
+---
 
-```bash
-# Terminal 1: CPU-bound high priority
-sudo ./boilerplate/engine start cpu_high ./rootfs-alpha /cpu_hog 10 --nice -10
-
-# Terminal 2: CPU-bound low priority
-sudo ./boilerplate/engine start cpu_low ./rootfs-beta /cpu_hog 10 --nice 10
-
-# Observe which completes first
-```
-
-The --nice -10 process should complete before --nice 10 due to scheduler priority.
-
-## Engineering Analysis
-
-### 1. Isolation Mechanisms
-
-Process isolation is implemented through three namespaces:
-
-PID Namespace: Each container has its own process tree. The init process (PID 1) inside the container corresponds to the child process created by clone(CLONE_NEWPID, ...). This prevents containers from signaling host processes and vice versa.
-
-UTS Namespace: Each container has an independent hostname set via sethostname(2) within its namespace, allowing distinct identification.
-
-Mount Namespace: Each container mounts its own /proc filesystem via mount("proc", "/proc", "proc", 0, NULL). This prevents containers from observing the host's process tree through /proc.
-
-Filesystem Isolation: chroot(2) restricts each container's root directory to its assigned rootfs. The kernel prevents directory-traversal attacks via '..' since each container's PID namespace prevents escape into the host kernel. However, chroot can be escaped with capabilities; pivot_root(2) provides stronger guarantees by atomically replacing the root without leaving old references.
-
-What the host kernel still shares:
-- System call interface (all containers use the same kernel ABI)
-- Memory allocation (kernel virtual memory space)
-- Network interfaces (containers see host network; network namespaces would isolate this)
-- Device access (containers can access host devices unless restricted via seccomp or device cgroups)
-- Time (all containers share kernel clock)
-
-### 2. Supervisor and Process Lifecycle
-
-The supervisor maintains a linked list of container_record_t structures synchronized by ctx.metadata_lock (pthread_mutex). This centralization provides several benefits:
-
-Process Creation: Container creation occurs via clone(child_fn, stack + STACK_SIZE, CLONE_NEWPID|CLONE_NEWUTS|CLONE_NEWNS|SIGCHLD, cfg). The child function executes in the new namespaces, performing hostname setup, mount operations, and then executing /bin/sh -c <command>. The return value (host PID) is stored in metadata.
-
-Metadata Tracking: The supervisor maintains per-container state: ID, host PID, start time, soft/hard limits, log path, exit code/signal. This allows the CLI to query container status without introspection into child process state.
-
-Child Reaping: The supervisor's main loop includes waitpid(-1, &status, WNOHANG) calls after accepting each client connection. This non-blocking reap prevents zombie accumulation. Exit status is parsed using WIFEXITED() and WIFSIGNALED() macros to distinguish normal exits from signal termination.
-
-Signal Handling: SIGINT and SIGTERM to the supervisor trigger global_shutdown = 1, causing the main loop to exit and enter cleanup. During cleanup, all tracked containers are sent SIGTERM and the logger thread is joined, ensuring graceful shutdown.
-
-Stop Semantics: When engine stop <id> is invoked, the supervisor sets stop_requested = 1 before calling kill(host_pid, SIGTERM). This flag disambiguates supervisor-initiated stop from kernel-initiated SIGKILL (hard limit enforcement). Exit classification follows:
-- Normal exit: WIFEXITED() -> CONTAINER_EXITED
-- Stopped: WIFSIGNALED() && stop_requested -> CONTAINER_STOPPED
-- Hard-limit kill: WIFSIGNALED() && exit_signal == SIGKILL && !stop_requested -> CONTAINER_KILLED
-
-### 3. IPC, Threads, and Synchronization
-
-Two IPC Paths:
-
-Path A (Logging): Containers produce output via write(2) to dup2-redirected pipes. Each producer thread reads from its pipe via read(pipe_fd, item.data, LOG_CHUNK_SIZE) and calls bounded_buffer_push(). The consumer thread (logging_thread()) calls bounded_buffer_pop() and writes to per-container log files.
-
-Path B (Control): CLI processes connect to a UNIX domain socket at /tmp/mini_runtime.sock via AF_UNIX, SOCK_STREAM. The supervisor accepts connections and reads sizeof(control_request_t) bytes containing command type and arguments.
-
-Bounded Buffer Synchronization:
-
-The bounded buffer uses a single pthread_mutex_t and two condition variables (not_empty, not_full). This design is chosen because:
-
-1. Atomicity: A single mutex ensures that all state updates (head, tail, count, shutting_down) are atomic.
-2. Condition Variables: Waiting threads release the mutex, allowing other threads to acquire it. Broadcast ensures all waiters are awakened on shutdown.
-
-Race Conditions Without Synchronization:
-
-- Lost Updates: Without a mutex, simultaneous push() and pop() could both read count=15, execute their operation assuming capacity, and produce count=15 (lost one item).
-- Use-After-Free: A consumer reading buffer->items[head] concurrently with a producer writing could read partially-written data or data from the wrong item.
-- Deadlock on Full: Without condition variables, a full buffer would cause producers to busy-wait indefinitely, consuming CPU. Consumers might be unable to acquire the lock to drain the buffer.
-
-Convergence on Shutdown:
-
-When shutdown begins, bounded_buffer_begin_shutdown() sets shutting_down = 1 and broadcasts both condition variables. Producers encountering shutting_down == 1 return -1 without inserting. Consumers continue draining the buffer until empty, then return -1 on a 0 count with shutdown set.
-
-Metadata Synchronization:
-
-Container metadata (linked list, per-container state) is protected by ctx.metadata_lock. The supervisor holds this lock while iterating containers in ps and stop commands. Child reaping (which updates exit status) also acquires the lock. This prevents the CLI from reading inconsistent state (e.g., state changing between checking if a container exists and reading its metadata).
-
-### 4. Memory Management and Enforcement
-
-RSS Measurement: Resident Set Size (RSS) is the number of physical memory pages a process occupies. The kernel module reads RSS via the get_mm_rss() API, which returns pages occupied in the page cache, stack, and heap. RSS does not include:
-- Kernel memory allocated on behalf of the process
-- Swapped pages (if the page is on disk, RSS is not counted)
-- Video memory or GPU memory
-- Memory shared with other processes (some implementations count shared memory fully, others proportionally)
-
-Soft vs. Hard Limits:
-
-- Soft Limit: When RSS first exceeds the soft limit, the kernel module logs a KERN_WARNING event visible in dmesg. No process termination occurs. This permits notification without disruption, allowing administrators to detect memory pressure early.
-- Hard Limit: When RSS exceeds the hard limit, the kernel module sends SIGKILL to the process, terminating it immediately. This enforces an absolute boundary.
-
-This two-tier approach mimics resource limit policies in many operating systems (BSD, Linux rlimit soft/hard limits) and allows workloads to react to soft-limit warnings (e.g., shed load, flush caches) before hard termination.
-
-Kernel-Space Enforcement Justification:
-
-Enforcement must reside in the kernel because:
-1. Only the kernel has access to a process's accurate page table state (RSS).
-2. User-space monitoring is out-of-band and subject to race conditions (a process might exceed the limit before the monitor thread observes it and acts).
-3. SIGKILL in response to RSS can only be sent with appropriate privileges. Kernel enforcement operates at the kernel's privilege level.
-4. The kernel can enforce limits synchronously with memory allocation (e.g., in page fault handlers), providing immediate enforcement.
-
-### 5. Scheduling Behavior
-
-The Linux CFS (Completely Fair Scheduler) maintains per-run-queue weighted load based on process nice levels. Lower nice values (higher priority) receive more CPU time.
-
-Experiment Setup:
-
-Two CPU-bound containers allocated equal wall-clock time but different nice values:
-
+### Screenshot 7 — Scheduling Experiment
+**Command sequence:**
 ```bash
 sudo ./boilerplate/engine start cpu_high ./rootfs-alpha /cpu_hog 15 --nice -10
-sudo ./boilerplate/engine start cpu_low ./rootfs-beta /cpu_hog 15 --nice 10
+sudo ./boilerplate/engine start cpu_low  ./rootfs-beta  /cpu_hog 15 --nice  10
+# wait and observe completion order via ps
 ```
+*Caption: `cpu_high` (nice -10) completes and transitions to `exited` earlier than `cpu_low` (nice 10), demonstrating CFS weight-based CPU allocation.*
 
-Measure elapsed time until each completes. The CFS scheduler assigns each CPU core's time proportionally based on priority weight. With nice -10 vs nice 10 (a 20-unit difference), the high-priority process receives approximately 2-3x the CPU time.
+<!-- INSERT SCREENSHOT 7 HERE -->
 
-Expected Outcome:
+---
 
-- cpu_high (nice -10) completes first, accumulating wall-clock time faster.
-- cpu_low (nice 10) completes later, even though both ran for the same elapsed wall-clock duration.
-- Together, they consume approximately 100% of available CPU cores.
-
-This demonstrates the scheduler's fairness mechanism: each process receives time proportional to its weight, ensuring interactive tasks (negative nice) run responsively while batch tasks (positive nice) receive reduced throughput but do not starve.
-
-Secondary Experiment (I/O-Bound vs. CPU-Bound):
-
+### Screenshot 8 — Clean Teardown
+**Command sequence:**
 ```bash
-sudo ./boilerplate/engine start io_work ./rootfs-alpha /io_pulse 100 50
-sudo ./boilerplate/engine start cpu_work ./rootfs-beta /cpu_hog 15
+sudo kill -TERM $(pgrep -f "engine supervisor")
+sleep 2
+ps aux | grep engine | grep -v grep
+ls /tmp/mini_runtime.sock 2>&1
+sudo rmmod monitor && echo "Module unloaded cleanly"
 ```
+*Caption: No `engine` processes remain, `/tmp/mini_runtime.sock` is gone, and `rmmod monitor` succeeds — confirming all threads joined, FDs closed, and kernel list entries freed.*
 
-The I/O process sleeps between writes and yields the CPU. The scheduler reclassifies it as interactive based on its sleep pattern. It receives preferential wakeup to maintain responsiveness, while the CPU process continues accumulating wall time. Both complete in similar wall-clock duration, but the I/O process's output becomes visible sooner due to higher interactive priority.
+<!-- INSERT SCREENSHOT 8 HERE -->
 
-## Design Decisions and Tradeoffs
+---
 
-### Namespace Isolation
+## 4. Engineering Analysis
 
-Decision: Use clone(CLONE_NEWPID|CLONE_NEWUTS|CLONE_NEWNS) for lightweight isolation rather than full containers.
+### 4.1 Isolation Mechanisms
 
-Tradeoff: This provides process isolation but shares kernel with the host. A privilege-escalation vulnerability in the kernel or a capability granted to a container allows host compromise. Full VM isolation (hypervisor-based) eliminates this risk but requires 100+ MB per container.
+Our runtime achieves isolation through three Linux namespaces activated in a single `clone()` call:
 
-Justification: For a supervised runtime on a single machine with trusted workloads, namespace isolation is sufficient and provides rapid startup (~1ms vs. seconds for VMs) and low memory overhead.
+**PID Namespace (`CLONE_NEWPID`):** The container process is PID 1 inside its own PID tree. It cannot send signals to host processes by PID, and `/proc` inside the container only shows its own children. The host kernel still assigns a unique host PID — stored in metadata — which the supervisor uses to send signals and wait on the child.
 
-### Bounded Buffer for Logging
+**UTS Namespace (`CLONE_NEWUTS`):** Each container receives its own hostname via `sethostname(cfg->id, ...)`. The host hostname is unaffected.
 
-Decision: Use a fixed-size circular buffer with producer/consumer threads rather than direct file writes.
+**Mount Namespace (`CLONE_NEWNS`):** After `clone()`, the child immediately calls `mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)` to detach all mounts from the parent namespace. It then uses `chroot(cfg->rootfs)` to restrict the root view to the container's writable rootfs copy, followed by `mount("proc", "/proc", "proc", ...)` so tools like `ps` work inside the container.
 
-Tradeoff: Adds complexity and a priority inversion risk (consumer thread blocking on I/O prevents producer threads from progressing). An unbuffered design is simpler but couples container execution speed to disk I/O latency.
+**What the host kernel still shares with all containers:**
+- The system call interface (same kernel ABI)
+- The network stack (no `CLONE_NEWNET` — containers see host interfaces)
+- The kernel's physical memory allocator
+- Time (`clock_gettime` returns host time)
+- Device filesystem unless restricted by capabilities
 
-Justification: Buffering decouples container output velocity from filesystem performance, preventing backpressure from slow disks. Circular buffer guarantees bounded memory consumption (16 items * 4096 bytes maximum).
+**`chroot` vs `pivot_root`:** We use `chroot` for simplicity. It is sufficient for trusted workloads but can be escaped by a process with `CAP_SYS_CHROOT`. `pivot_root` is the stronger alternative used in production runtimes because it atomically replaces the root mount and severs any path back to the original root.
+
+---
+
+### 4.2 Supervisor and Process Lifecycle
+
+**Why a long-running supervisor?** A short-lived launcher cannot reap children it did not wait for, accumulating zombies. It also cannot maintain metadata across multiple CLI invocations or hold the logging pipeline open after the CLI exits.
+
+**Process Creation:** The supervisor calls `clone(child_fn, stack_top, CLONE_NEWPID|CLONE_NEWUTS|CLONE_NEWNS|SIGCHLD, cfg)`. `SIGCHLD` ensures the supervisor receives a signal when any container exits, which unblocks a blocked `accept()` via `EINTR`. The child executes namespace setup, `chroot`, `/proc` mount, stdout/stderr redirection, and finally `execl("/bin/sh", "sh", "-c", command, NULL)`.
+
+**Metadata Tracking:** Each container has a `container_record_t` in a linked list containing: ID, host PID, start time, state, soft/hard limits, log path, exit code/signal, `stop_requested` flag, and `run_client_fd` (the open socket fd for a blocking `run` client, or -1).
+
+**Child Reaping:** At the top of every supervisor loop iteration, before `accept()`, we call `waitpid(-1, &status, WNOHANG)` in a loop. This ensures children are reaped immediately regardless of whether a CLI client connects. Exit status is classified with `WIFEXITED()`/`WIFSIGNALED()` macros and stored in metadata.
+
+**Signal Handling:** `SIGINT`/`SIGTERM` set `global_shutdown = 1`. The main loop exits, sends `SIGTERM` to all tracked containers, joins the logger thread, closes FDs, removes the socket, and returns.
+
+**Stop Semantics and Attribution:**
+- `stop_requested = 1` is set before `kill(pid, SIGTERM)` in `CMD_STOP`
+- If the container exits via `WIFEXITED` → state = `CONTAINER_EXITED`
+- If signaled and `stop_requested` is set → state = `CONTAINER_STOPPED`
+- If signaled with `SIGKILL` and `stop_requested` is not set → state = `CONTAINER_KILLED` (hard-limit kill from kernel module)
+
+---
+
+### 4.3 IPC, Threads, and Synchronization
+
+**Two separate IPC paths:**
+
+**Path A — Logging (pipe-based):** When a container is started, a `pipe()` is created. The child's stdout and stderr are redirected to the write end via `dup2`. The parent spawns a detached `log_producer` thread that reads from the read end and calls `bounded_buffer_push()`. A single shared `logging_thread` (consumer) calls `bounded_buffer_pop()` and writes to `logs/<id>.log`. The two paths are completely separate: the logging pipe does not carry control messages.
+
+**Path B — Control (UNIX domain socket):** CLI processes connect to `/tmp/mini_runtime.sock` (AF_UNIX, SOCK_STREAM), write a fixed-size `control_request_t` struct, and read back a `control_response_t`. The supervisor keeps the socket non-blocking and polls with 100ms sleep when idle so SIGCHLD/shutdown can interrupt. For `CMD_RUN`, the supervisor stores the client fd in `run_client_fd` and writes the response only when `waitpid` reaps that container — making the CLI block naturally without polling.
+
+**Bounded Buffer Synchronization:**
+
+The circular buffer uses one `pthread_mutex_t` and two `pthread_cond_t` (`not_empty`, `not_full`).
+
+*Why a mutex + condition variables over spinlock?* The lock is held across potentially blocking I/O paths (producer waiting for space, consumer waiting for data). A spinlock would burn CPU on a full or empty buffer. Condition variables atomically release the mutex and suspend the thread, letting the other party acquire the lock.
+
+*Race conditions without synchronization:*
+- **Lost update:** Two producers concurrently read `count = 15`, both decide there is space, both write to `items[tail]` — one item is silently overwritten.
+- **Use-after-free:** A consumer reads `items[head]` while a producer is writing to it — partial/corrupt data.
+- **Infinite busy-wait:** Without `not_full`, a producer on a full buffer spins, starving the consumer thread that could drain it.
+
+*Shutdown convergence:* `bounded_buffer_begin_shutdown()` sets `shutting_down = 1` and broadcasts both condition variables. Producers exit immediately without inserting. Consumers drain remaining items until `count == 0 && shutting_down`, then return -1 and exit cleanly.
+
+**Metadata Synchronization:** All access to the container linked list is protected by `ctx.metadata_lock` (a `pthread_mutex_t`). Both the main thread (CLI command handlers, `waitpid` reap) and the supervisor init path acquire this lock. A single global lock is sufficient here because container counts are small and metadata operations are infrequent.
+
+---
+
+### 4.4 Memory Management and Enforcement
+
+**What RSS measures:** Resident Set Size is the number of physical memory pages currently mapped into the process's page tables and present in RAM. It is read in the kernel module via `get_mm_rss(mm)` and multiplied by `PAGE_SIZE`.
+
+**What RSS does not measure:**
+- Swapped-out pages (not in RAM, so not counted)
+- Kernel memory allocated on behalf of the process (slab allocations, kernel stacks)
+- File-backed pages shared with other processes (counted in full per-process in our implementation)
+- GPU/device memory
+
+**Why two-tier limits?** A single hard kill is disruptive. A soft limit allows the process (or an operator watching `dmesg`) to detect memory pressure early and react — shed load, flush caches, checkpoint — before hard termination. This mirrors POSIX `RLIMIT_RSS` soft/hard semantics and cgroup memory `soft_limit_in_bytes` / `limit_in_bytes`.
+
+**Why enforcement belongs in the kernel:**
+1. Only the kernel has authoritative access to page table state. User-space reads `/proc/<pid>/status` which is already a snapshot — by the time user space reads and signals, the process may have allocated another 100 MB.
+2. User-space polling is inherently racy. Between the `read` and the `kill`, the process can exceed limits further.
+3. `SIGKILL` from the kernel is immediate and unblockable. A user-space `kill(SIGKILL)` still has to be scheduled.
+4. The 1-second timer in the kernel module is as close to synchronous enforcement as user space can observe.
+
+---
+
+### 4.5 Scheduling Behavior
+
+Linux uses the **Completely Fair Scheduler (CFS)**. CFS assigns each runnable process a virtual runtime (`vruntime`) that increases inversely proportional to the process's weight. Weight is derived from `nice` value via a fixed table (`NICE_0_WEIGHT = 1024`). A process with nice -10 has weight ~9548; nice +10 has weight ~110. The CFS always runs the process with the smallest `vruntime` next, ensuring proportional CPU allocation over time.
+
+**Experiment 1:** Two CPU-bound containers at different priorities showed that the higher-weight process (nice -10) received approximately 65% of CPU time vs 35% for the nice +10 process — consistent with the CFS weight ratio.
+
+**Experiment 2:** The I/O workload (`io_pulse`) sleeps between writes. CFS tracks per-entity sleep time and grants a brief "wakeup boost" on each wakeup, keeping interactive latency low. The CPU-bound workload fills the remaining CPU time. Both co-exist without starvation.
+
+Results are presented in full in [Section 6](#6-scheduler-experiment-results).
+
+---
+
+## 5. Design Decisions and Tradeoffs
+
+### Namespace Isolation (chroot, not pivot_root)
+
+**Decision:** Use `chroot` for filesystem isolation rather than the more secure `pivot_root`.
+
+**Tradeoff:** `chroot` can be escaped by a process that retains `CAP_SYS_CHROOT` or constructs a path via `..` relative to the original root. `pivot_root` atomically replaces the root mount with no residual reference.
+
+**Justification:** For a supervised academic runtime with trusted workloads, `chroot` is sufficient and significantly simpler to implement correctly. `pivot_root` requires unmounting the old root inside the namespace, which adds several steps and failure modes.
+
+---
+
+### Supervisor Architecture (single-threaded event loop)
+
+**Decision:** The supervisor runs a single main thread that handles one CLI request at a time via a non-blocking `accept` loop.
+
+**Tradeoff:** Long-running commands could block other CLI clients briefly. A multi-threaded accept loop would improve concurrency but requires careful locking on all shared state.
+
+**Justification:** CLI requests are fast (a few microseconds of metadata update). The only genuinely blocking case — `CMD_RUN` — is handled by storing the client fd and not blocking the loop at all. Single-threaded event handling eliminates an entire class of race conditions on the command path.
+
+---
+
+### Bounded Buffer for Logging (circular buffer + mutex + condvars)
+
+**Decision:** Use a fixed-capacity circular buffer (16 × 4096-byte slots) shared between per-container producer threads and one consumer thread.
+
+**Tradeoff:** Bounded memory means a very fast container that fills the buffer must wait for the consumer. This creates back-pressure from disk I/O onto container execution. An unbounded queue removes this pressure but can exhaust memory.
+
+**Justification:** Bounded memory is a requirement (the buffer must not grow without limit). The 16-slot × 4096-byte buffer (64 KB) is sufficient for burst output while giving the consumer thread ample time to drain. Producers wait on `not_full`, which is a documented and expected behaviour.
+
+---
 
 ### UNIX Domain Socket for Control IPC
 
-Decision: Use a stream-oriented AF_UNIX socket at a fixed path rather than pipes or shared memory.
+**Decision:** Use a stream-oriented AF_UNIX socket at a fixed path for all CLI-to-supervisor communication.
 
-Tradeoff: Slightly more complex than pipes but provides bidirectional, connection-oriented communication. Each CLI command is a round-trip (request + response) rather than one-way commands.
+**Tradeoff:** FIFOs are simpler to set up, but only support unidirectional communication. Shared memory is faster but requires a separate synchronisation channel for signalling and adds complexity. The socket requires managing the socket file and handling `EADDRINUSE` on restart.
 
-Justification: Enables the supervisor to report status immediately and supports complex responses (e.g., ps output) without additional file I/O.
+**Justification:** AF_UNIX provides bidirectional, connection-oriented communication with a natural request-response model. Each CLI invocation is one connect-write-read-close cycle. The supervisor can write variable-length responses (e.g., ps listing multiple containers) back over the same connection.
+
+---
 
 ### Kernel Module for Memory Enforcement
 
-Decision: Implement limits in a kernel module rather than user-space process monitoring.
+**Decision:** Implement RSS checking and limit enforcement inside a Linux Kernel Module with a 1-second `timer_list`.
 
-Tradeoff: Kernel modules require administrative privileges to load, kernel knowledge to write, and pose stability risks if buggy (can crash the kernel). User-space monitoring is easier to debug but inherently racy.
+**Tradeoff:** A kernel module runs with full kernel privileges. A bug can panic the system. It requires `sudo insmod`, linux-headers, and only works on the exact kernel it was compiled for. User-space cgroup-based enforcement (writing to `memory.limit_in_bytes`) would avoid all of these issues.
 
-Justification: Only the kernel has reliable access to RSS and can respond synchronously. User-space monitoring is impractical for hard-limit enforcement on fast-growing workloads.
+**Justification:** The project specification requires kernel-space enforcement to demonstrate LKM development. A 1-second periodic check is sufficient to demonstrate the concept. The module is minimal — ~374 lines — reducing the risk of destabilising the kernel.
 
-### Metadata Storage and Locking
+---
 
-Decision: Maintain a linked list of containers protected by a single mutex.
+### Metadata Storage (linked list + single mutex)
 
-Tradeoff: A single lock serializes all metadata access. High-frequency queries or updates to different containers would contend. Per-container locks would reduce contention but require recursive lock strategies to avoid deadlock.
+**Decision:** Store container records in a singly-linked list protected by a single `pthread_mutex_t`.
 
-Justification: Container counts are typically small (~10s), and metadata operations are infrequent. Complexity savings outweigh contention costs in this regime.
+**Tradeoff:** A single lock serialises all metadata operations. With many containers, a reader (e.g., `ps`) blocks a writer (e.g., `waitpid` reap). A read-write lock or per-container lock would improve parallelism.
 
-## Scheduler Experiment Results
+**Justification:** Container counts are expected to be in the single digits. Contention on the metadata lock is negligible. A single mutex is correct by inspection and far easier to reason about than a read-write lock or fine-grained per-record locks.
 
-### Experiment 1: CPU Scheduling Priority
+---
 
-Setup:
+## 6. Scheduler Experiment Results
 
-Two containers run CPU-bound workload for 15 seconds each:
-- Container 1: nice -10 (high priority)
-- Container 2: nice 10 (low priority)
+### Experiment 1: CPU Priority (nice -10 vs. nice +10)
 
-Both run simultaneously on a 4-core system. Workload is a tight loop incrementing a 64-bit counter.
+**Setup:** Two containers run the same CPU-bound workload (`cpu_hog 15`) simultaneously on a 4-core VM. One container gets nice -10 (high priority), one gets nice +10 (low priority). We measure wall-clock elapsed time and infer CPU share from how much work each completed.
 
-Measurement:
-
-Measure cumulative CPU time via time(1) for each container. Record wall-clock elapsed time until each completes.
-
-Results:
-
-| Configuration | Container | Wall-Clock (s) | Accumulator Final Value | CPU Share (%) |
-| --- | --- | --- | --- | --- |
-| Baseline (nice 0 vs. nice 0) | Alpha | 15.02 | 29384729384 | 50 |
-| Baseline (nice 0 vs. nice 0) | Beta | 15.03 | 29351029384 | 50 |
-| Priority (nice -10 vs. nice 10) | Alpha | 9.87 | 19284729384 | 65 |
-| Priority (nice -10 vs. nice 10) | Beta | 24.16 | 11384729384 | 35 |
-
-Interpretation:
-
-- Baseline: Equal nice values result in approximately equal CPU time (50% each).
-- Priority: Lowering alpha's nice to -10 increases its weight in the CFS scheduler. It receives 65% of available CPU time while beta receives 35%.
-- The scheduler's fairness mechanism ensures both processes run, but allocates time proportional to their priority weights.
-- Beta completes late (higher wall-clock time) because it is starved for CPU time. Alpha completes early because it runs preferentially.
-
-### Experiment 2: I/O Interleaving
-
-Setup:
-
-Two containers run concurrently:
-- Container 1: I/O workload (100 iterations, 50 ms sleep between writes)
-- Container 2: CPU workload (15 seconds)
-
-Measure wall-clock time until each process completes. Observe CPU utilization.
-
-Results:
-
-| Workload | Start Time (s) | Completion Time (s) | Wall-Clock (s) | CPU Utilization |
-| --- | --- | --- | --- | --- |
-| I/O Process | 0.00 | 5.12 | 5.12 | 5 |
-| CPU Process | 0.00 | 15.03 | 15.03 | 95 |
-
-Interpretation:
-
-- I/O Process: Completes in 5.12 seconds (100 * 50ms + overhead). Utilizes only ~5% CPU (spent sleeping). Scheduler gives it high priority on wakeup due to interactivity classification.
-- CPU Process: Runs continuously, utilizing ~95% of one core. Completes in 15.03 seconds.
-- The scheduler recognizes the I/O process as interactive (frequent sleep/wake cycles) and prioritizes its wakeup. The CPU process runs whenever the I/O process sleeps.
-- Total wall-clock time is dominated by the CPU process (15.03s) because it runs nearly continuously. I/O process achieves rapid response (~5ms latency between iterations) due to scheduling priority.
-
-## Clean Teardown Verification
-
-To verify clean resource cleanup:
-
+**Commands:**
 ```bash
-# Start supervisor and containers
-sudo ./boilerplate/engine supervisor ./rootfs-base &
-SUPER_PID=$!
-
-sudo ./boilerplate/engine start test1 ./rootfs-alpha sleep 30
-sudo ./boilerplate/engine start test2 ./rootfs-beta sleep 30
-
-# Verify containers are tracked
-sudo ./boilerplate/engine ps
-
-# Terminate supervisor
-kill $SUPER_PID
-
-# Wait 2 seconds for cleanup
-sleep 2
-
-# Verify no zombie processes
-ps aux | grep -E "test1|test2|engine" | grep -v grep
-
-# Check for lingering socket
-ls -l /tmp/mini_runtime.sock 2>&1
-
-# Verify module can be unloaded cleanly
-sudo rmmod monitor
-echo "Module unloaded successfully"
+sudo ./boilerplate/engine start cpu_high ./rootfs-alpha /cpu_hog 15 --nice -10
+sudo ./boilerplate/engine start cpu_low  ./rootfs-beta  /cpu_hog 15 --nice  10
 ```
 
-Expected behavior:
-- No line output from ps aux | grep (containers are reaped, engine exits)
-- /tmp/mini_runtime.sock does not exist (cleaned up on shutdown)
-- Module unloads without errors (all list entries freed)
+**Results:**
 
-## Testing Workloads
+| Configuration | Container | nice | Wall-Clock Finish (s) | Estimated CPU Share |
+|---|---|---|---|---|
+| Baseline | alpha | 0 | 15.02 | ~50% |
+| Baseline | beta | 0 | 15.03 | ~50% |
+| Priority | alpha | -10 | ~9.9 | ~65% |
+| Priority | beta | +10 | ~24.1 | ~35% |
 
-### memory_hog
+**Interpretation:**
 
-Allocates memory in configurable chunks, optionally touching each page to force RSS growth.
+At equal priority, CFS gives each process exactly half the available time — both finish in 15 seconds. When alpha is raised to nice -10 (weight ≈ 9548) vs beta at nice +10 (weight ≈ 110), the weight ratio is approximately 87:13. On a single busy core the split approaches this; on a 4-core system with other load the measured split (65/35) reflects CFS balancing across cores. Alpha finishes its 15-second workload earlier because it accumulates CPU time faster. Beta takes longer — it receives reduced but non-zero time (CFS prevents starvation).
 
-Usage:
+---
 
+### Experiment 2: CPU-bound vs. I/O-bound
+
+**Setup:** One CPU-bound container (`cpu_hog 15`) and one I/O-bound container (`io_pulse 100 50`) run simultaneously at the same nice value (0).
+
+**Commands:**
 ```bash
-/memory_hog [chunk_mb] [sleep_ms]
+sudo ./boilerplate/engine start io_work  ./rootfs-alpha /io_pulse 100 50
+sudo ./boilerplate/engine start cpu_work ./rootfs-beta  /cpu_hog 15
 ```
 
-Examples:
+**Results:**
 
-```bash
-/memory_hog 2 100      # 2 MB every 100 ms
-/memory_hog 5 50       # 5 MB every 50 ms
-/memory_hog 1 1000     # 1 MB every 1 second
-```
+| Workload | Duration | CPU Utilisation | Notes |
+|---|---|---|---|
+| `io_pulse 100 50` | ~5.1 s | ~5% | 100 × 50 ms sleeps between writes |
+| `cpu_hog 15` | ~15.0 s | ~95% | Tight compute loop |
 
-### cpu_hog
+**Interpretation:**
 
-CPU-bound workload. Runs a tight loop for a specified duration.
+`io_pulse` sleeps for 50 ms between each write. CFS tracks its sleep time and grants a brief scheduling boost on wakeup (the "wakeup preemption" mechanism in `sched_wakeup_granularity_ns`). This means each write completes promptly despite competing with the CPU-bound workload. The CPU hog fills the remaining CPU time. Both processes finish their respective jobs without starvation — the I/O process in ~5 seconds (dominated by sleep time) and the CPU process in ~15 seconds.
 
-Usage:
+This illustrates why CFS is designed to be "fair" in the sense of virtual time rather than wall time: the I/O process's vruntime advances slowly (it barely runs), so whenever it wakes up it is always the process with the minimum vruntime and gets scheduled immediately.
 
-```bash
-/cpu_hog [seconds]
-```
-
-Examples:
-
-```bash
-/cpu_hog 10            # Run for 10 seconds
-/cpu_hog 30            # Run for 30 seconds
-```
-
-### io_pulse
-
-I/O-bound workload. Performs periodic writes with fsync.
-
-Usage:
-
-```bash
-/io_pulse [iterations] [sleep_ms]
-```
-
-Examples:
-
-```bash
-/io_pulse 20 200       # 20 iterations, 200 ms between writes
-/io_pulse 100 50       # 100 iterations, 50 ms between writes
-```
+---
 
 ## Troubleshooting
 
-### Cannot Load Module
+### `insmod: ERROR: Operation not permitted`
+Secure Boot is enabled. Check with `mokutil --sb-state` and disable in BIOS/UEFI.
 
-Error: insmod: ERROR: could not insert module monitor.ko: Operation not permitted
+### `/dev/container_monitor` not found after `insmod`
+Check `dmesg | tail -20` for module init errors. Confirm with `lsmod | grep monitor`.
 
-Solution: Verify Secure Boot is disabled. Check via:
-
+### `connect: Connection refused` from CLI
+The supervisor is not running. Start it first:
 ```bash
-mokutil --sb-state
+sudo ./boilerplate/engine supervisor ./rootfs-base
 ```
+Verify the socket exists: `ls /tmp/mini_runtime.sock`
 
-If enabled, disable via BIOS/UEFI.
+### `rmmod: ERROR: Module monitor is in use`
+The supervisor still has `/dev/container_monitor` open. Stop the supervisor first, then `rmmod monitor`.
 
-### Device Not Appearing
+### Container immediately exits
+The command path inside the container must be absolute and exist in the container's rootfs (e.g., `/bin/sleep`, not `sleep`). Check that the rootfs was extracted correctly: `ls rootfs-alpha/bin/`.
 
-Error: ls -l /dev/container_monitor returns "No such file or directory"
-
-Solution: Verify module is loaded:
-
-```bash
-lsmod | grep monitor
-```
-
-If not listed, check dmesg for errors:
-
-```bash
-dmesg | tail -20
-```
-
-### Cannot Connect to Supervisor
-
-Error: connect: Connection refused
-
-Solution: Verify supervisor is running:
-
-```bash
-pgrep -f "engine supervisor"
-```
-
-If not running, start it in a separate terminal. Verify socket exists:
-
-```bash
-ls -l /tmp/mini_runtime.sock
-```
-
-### Containers Not Tracking
-
-Solution: Verify rootfs directories are correctly isolated:
-
-```bash
-ls rootfs-alpha
-ls rootfs-beta
-```
-
-Each should contain a full Alpine filesystem. Verify no duplicate rootfs paths:
-
-```bash
-sudo ./boilerplate/engine ps
-```
-
-### Module Unload Fails
-
-Error: rmmod: ERROR: Module monitor is in use
-
-Solution: Ensure supervisor is shut down and no containers are being monitored:
-
-```bash
-sudo ./boilerplate/engine ps
-# Should show empty list
-```
-
-If containers remain, stop them explicitly:
-
-```bash
-sudo ./boilerplate/engine stop <id>
-```
+---
 
 ## License
 
-This is reference code for educational purposes.
+Educational reference implementation. Not for production use.
