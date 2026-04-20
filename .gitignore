@@ -1,1 +1,32 @@
-solved
+# Root-level generated files
+rootfs-*/
+logs/
+*.tar.gz
+*.tar.gz.*
+*.pdf
+
+# Kernel module build artifacts
+boilerplate/*.o
+boilerplate/*.ko
+boilerplate/*.mod
+boilerplate/*.mod.c
+boilerplate/*.mod.o
+boilerplate/Module.symvers
+boilerplate/modules.order
+boilerplate/.*.cmd
+boilerplate/.tmp_versions/
+
+# User-space compiled binaries
+boilerplate/engine
+boilerplate/memory_hog
+boilerplate/cpu_hog
+boilerplate/io_pulse
+
+# Log files
+boilerplate/logs/
+boilerplate/*.log
+
+# Misc
+*.swp
+*.swo
+*~

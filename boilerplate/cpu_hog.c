@@ -30,7 +30,6 @@ int main(int argc, char *argv[])
 {
     const unsigned int duration = (argc > 1) ? parse_seconds(argv[1], 10) : 10;
     const time_t start = time(NULL);
-    time_t last_report = start;
     volatile unsigned long long accumulator = 0;
 
     while ((unsigned int)(time(NULL) - start) < duration) {

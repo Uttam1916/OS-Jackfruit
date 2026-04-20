@@ -555,6 +555,7 @@ void *log_producer(void *arg) {
 
 static int run_supervisor(const char *rootfs)
 {
+    (void)rootfs; /* base rootfs path noted; containers use their own copies */
     supervisor_ctx_t ctx;
     int rc;
 
@@ -661,7 +662,7 @@ static int run_supervisor(const char *rootfs)
                                      "Container %s exited: code=%d signal=%d state=%s\n",
                                      cur->id, cur->exit_code, cur->exit_signal,
                                      state_to_string(cur->state));
-                            (void)write(cur->run_client_fd, &run_resp, sizeof(run_resp));
+                            { ssize_t _w = write(cur->run_client_fd, &run_resp, sizeof(run_resp)); (void)_w; }
                             close(cur->run_client_fd);
                             cur->run_client_fd = -1;
                         }
@@ -702,7 +703,7 @@ static int run_supervisor(const char *rootfs)
             if (pipe(pipefd) < 0) {
                 perror("pipe");
                 snprintf(resp.message, sizeof(resp.message), "pipe() failed\n");
-                (void)write(client_fd, &resp, sizeof(resp));
+                { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
                 close(client_fd);
                 continue;
             }
@@ -714,9 +715,9 @@ static int run_supervisor(const char *rootfs)
                 continue;
             }
             memset(cfg, 0, sizeof(*cfg));
-            strncpy(cfg->id, req.container_id, CONTAINER_ID_LEN - 1);
-            strncpy(cfg->rootfs, req.rootfs, PATH_MAX - 1);
-            strncpy(cfg->command, req.command, CHILD_COMMAND_LEN - 1);
+            snprintf(cfg->id,      sizeof(cfg->id),      "%s", req.container_id);
+            snprintf(cfg->rootfs,  sizeof(cfg->rootfs),  "%s", req.rootfs);
+            snprintf(cfg->command, sizeof(cfg->command), "%s", req.command);
             cfg->nice_value = req.nice_value;
             cfg->log_write_fd = pipefd[1];
 
@@ -745,7 +746,7 @@ static int run_supervisor(const char *rootfs)
 
             if (rootfs_busy) {
                 snprintf(resp.message, sizeof(resp.message), "Rootfs already in use\n");
-                (void)write(client_fd, &resp, sizeof(resp));
+                { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
                 close(client_fd);
                 close(pipefd[0]); close(pipefd[1]);
                 free(cfg); free(stack);
@@ -762,7 +763,7 @@ static int run_supervisor(const char *rootfs)
                 close(pipefd[0]); close(pipefd[1]);
                 free(stack);
                 snprintf(resp.message, sizeof(resp.message), "clone() failed\n");
-                (void)write(client_fd, &resp, sizeof(resp));
+                { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
                 close(client_fd);
                 continue;
             }
@@ -782,8 +783,8 @@ static int run_supervisor(const char *rootfs)
                 continue;
             }
             memset(rec, 0, sizeof(*rec));
-            strncpy(rec->id,     req.container_id, CONTAINER_ID_LEN - 1);
-            strncpy(rec->rootfs, req.rootfs,       PATH_MAX - 1);
+            snprintf(rec->id,     sizeof(rec->id),     "%s", req.container_id);
+            snprintf(rec->rootfs, sizeof(rec->rootfs), "%s", req.rootfs);
             rec->host_pid        = pid;
             rec->state           = CONTAINER_RUNNING;
             rec->started_at      = time(NULL);
@@ -834,7 +835,7 @@ static int run_supervisor(const char *rootfs)
             if (req.kind == CMD_START) {
                 snprintf(resp.message, sizeof(resp.message),
                          "Started container %s\n", req.container_id);
-                (void)write(client_fd, &resp, sizeof(resp));
+                { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
                 close(client_fd);
             }
             /* CMD_RUN: client_fd stored in record; response sent on reap */
@@ -852,8 +853,8 @@ static int run_supervisor(const char *rootfs)
                 cur = cur->next;
             }
             pthread_mutex_unlock(&ctx.metadata_lock);
-            strncpy(resp.message, buf, sizeof(resp.message) - 1);
-            (void)write(client_fd, &resp, sizeof(resp));
+            snprintf(resp.message, sizeof(resp.message), "%s", buf);
+            { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
             close(client_fd);
 
         } else if (req.kind == CMD_STOP) {
@@ -875,7 +876,7 @@ static int run_supervisor(const char *rootfs)
             if (!cur)
                 snprintf(resp.message, sizeof(resp.message), "Container not found\n");
             pthread_mutex_unlock(&ctx.metadata_lock);
-            (void)write(client_fd, &resp, sizeof(resp));
+            { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
             close(client_fd);
 
         } else if (req.kind == CMD_LOGS) {
@@ -890,12 +891,12 @@ static int run_supervisor(const char *rootfs)
                 if (r > 0) resp.message[r] = '\0';
                 close(fd);
             }
-            (void)write(client_fd, &resp, sizeof(resp));
+            { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
             close(client_fd);
 
         } else {
             snprintf(resp.message, sizeof(resp.message), "Unknown command\n");
-            (void)write(client_fd, &resp, sizeof(resp));
+            { ssize_t _w = write(client_fd, &resp, sizeof(resp)); (void)_w; }
             close(client_fd);
         }
     }
@@ -1119,7 +1120,7 @@ static int cmd_run(int argc, char *argv[])
         control_request_t stop_req;
         memset(&stop_req, 0, sizeof(stop_req));
         stop_req.kind = CMD_STOP;
-        strncpy(stop_req.container_id, run_stop_id, sizeof(stop_req.container_id) - 1);
+        snprintf(stop_req.container_id, sizeof(stop_req.container_id), "%s", run_stop_id);
         send_control_request(&stop_req);
         return 130; /* 128 + SIGINT */
     }

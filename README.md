@@ -36,36 +36,44 @@ sudo apt install -y build-essential linux-headers-$(uname -r)
 
 ### Compile everything
 
+> **All commands below assume you are in the project root (`OS-Jackfruit/`), not inside `boilerplate/`.**
+
 ```bash
-cd boilerplate
-make
+# From the project root:
+cd boilerplate && make && cd ..
 ```
 
-Produces: `engine`, `memory_hog`, `cpu_hog`, `io_pulse`, `monitor.ko`
+Produces inside `boilerplate/`: `engine`, `memory_hog`, `cpu_hog`, `io_pulse`, `monitor.ko`
 
 ### CI-safe build (user-space only, no kernel headers)
 
 ```bash
+# From the project root:
 make -C boilerplate ci
 ```
 
-This is the target checked by GitHub Actions. It builds only the user-space binaries and requires no `sudo`, no kernel headers, and no running supervisor.
+This is the target checked by GitHub Actions. Builds only user-space binaries — no `sudo`, no kernel headers, no running supervisor needed.
 
 ---
 
 ## Full Run Sequence
 
+> **Every command below is run from the project root (`OS-Jackfruit/`) unless stated otherwise.**
+
 ### 1. Environment check
 
 ```bash
+# Must be run from inside boilerplate/
 cd boilerplate
 chmod +x environment-check.sh
 sudo ./environment-check.sh
+cd ..
 ```
 
 ### 2. Load the kernel module
 
 ```bash
+# From project root
 sudo insmod boilerplate/monitor.ko
 ls -l /dev/container_monitor
 ```
@@ -75,6 +83,7 @@ The device `/dev/container_monitor` must appear before the supervisor starts.
 ### 3. Prepare root filesystems
 
 ```bash
+# From project root
 mkdir -p rootfs-base
 wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
 tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
@@ -84,9 +93,10 @@ cp -a rootfs-base rootfs-beta
 cp -a rootfs-base rootfs-gamma
 ```
 
-Copy test workloads into the rootfs copies before launch:
+Copy test workloads into each rootfs **before** launching containers:
 
 ```bash
+# From project root
 cp boilerplate/memory_hog boilerplate/cpu_hog boilerplate/io_pulse rootfs-alpha/
 cp boilerplate/memory_hog boilerplate/cpu_hog rootfs-beta/
 cp boilerplate/memory_hog rootfs-gamma/
@@ -97,12 +107,13 @@ No two live containers may share the same writable rootfs directory.
 ### 4. Start the supervisor (Terminal 1)
 
 ```bash
+# From project root, Terminal 1
 sudo ./boilerplate/engine supervisor ./rootfs-base
 ```
 
-The supervisor prints nothing and waits. It opens the UNIX socket, starts the logger thread, and opens `/dev/container_monitor`.
+The supervisor blocks here. Open a new terminal for all subsequent commands.
 
-### 5. Container operations (Terminal 2)
+### 5. Container operations (Terminal 2, from project root)
 
 ```bash
 # Start containers in the background
@@ -129,6 +140,7 @@ dmesg | tail -20
 ### 6. Scheduling experiments
 
 ```bash
+# From project root
 # Experiment 1: Two CPU-bound containers at different priorities
 sudo ./boilerplate/engine start cpu_high ./rootfs-alpha /cpu_hog 15 --nice -10
 sudo ./boilerplate/engine start cpu_low  ./rootfs-beta  /cpu_hog 15 --nice  10
@@ -144,6 +156,7 @@ sudo ./boilerplate/engine start cpu_work ./rootfs-beta  /cpu_hog 15
 ### 7. Memory limit experiments
 
 ```bash
+# From project root
 # Soft limit — container keeps running, kernel logs a warning
 sudo ./boilerplate/engine start softtest ./rootfs-gamma /memory_hog 1 50 \
     --soft-mib 16 --hard-mib 96
@@ -161,11 +174,12 @@ sudo ./boilerplate/engine ps   # state should show: killed
 ### 8. Clean teardown
 
 ```bash
+# From project root
 # Stop any remaining containers
 sudo ./boilerplate/engine stop beta
 
 # Send SIGTERM to supervisor — triggers graceful shutdown:
-#   kills remaining containers, joins logger thread, closes FDs, removes socket
+# kills remaining containers, joins logger thread, closes FDs, removes socket
 sudo kill -TERM $(pgrep -f "engine supervisor")
 sleep 2
 
@@ -175,7 +189,7 @@ ps aux | grep engine | grep -v grep
 # Verify socket is cleaned up
 ls /tmp/mini_runtime.sock 2>&1
 
-# Unload kernel module — all list entries must be freed first
+# Unload kernel module (all list entries must already be freed)
 sudo rmmod monitor
 dmesg | tail -5
 ```
