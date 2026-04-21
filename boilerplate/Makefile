@@ -43,7 +43,4 @@ install: module
 uninstall:
 	sudo rmmod monitor
 
-.PHONY: all module clean install uninstall ci
-
-# CI-safe: compile user-space binaries only (no kernel headers, no sudo)
-ci: $(USER_TARGETS)
+.PHONY: all module clean install uninstall

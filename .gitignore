@@ -1,9 +1,10 @@
-# Root-level generated files
+# Root filesystems (created at runtime, never commit)
 rootfs-*/
 logs/
+
+# Alpine tarballs
 *.tar.gz
 *.tar.gz.*
-*.pdf
 
 # Kernel module build artifacts
 boilerplate/*.o
@@ -22,11 +23,11 @@ boilerplate/memory_hog
 boilerplate/cpu_hog
 boilerplate/io_pulse
 
-# Log files
+# Runtime logs
 boilerplate/logs/
 boilerplate/*.log
 
-# Misc
+# Editor junk
 *.swp
 *.swo
 *~
